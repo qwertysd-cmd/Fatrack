@@ -27,13 +27,21 @@ def bucketize_by_time(entries: List[Dict[str, Any]], bins: int) -> List[List[Dic
     Assign each entry to the nearest center.
 
     This avoids dense logging periods dominating x-axis space.
+
+    Note: entries should be aggregated by day (one entry per day).
     """
     if not entries:
         return [[] for _ in range(bins)]
 
-    es = sorted(entries, key=lambda e: e["ts"])
-    t0 = parse_iso(es[0]["ts"]).timestamp()
-    t1 = parse_iso(es[-1]["ts"]).timestamp()
+    # Sort by day (entries are already aggregated by day)
+    es = sorted(entries, key=lambda e: e.get("day", e["ts"]))
+
+    # Use day for bucketing (convert to timestamp for math)
+    first_day = dt.date.fromisoformat(es[0].get("day", es[0]["ts"][:10]))
+    last_day = dt.date.fromisoformat(es[-1].get("day", es[-1]["ts"][:10]))
+
+    t0 = dt.datetime.combine(first_day, dt.time.min, tzinfo=dt.timezone.utc).timestamp()
+    t1 = dt.datetime.combine(last_day, dt.time.min, tzinfo=dt.timezone.utc).timestamp()
 
     if t0 == t1:
         buckets = [[] for _ in range(bins)]
@@ -47,7 +55,11 @@ def bucketize_by_time(entries: List[Dict[str, Any]], bins: int) -> List[List[Dic
 
     buckets: List[List[Dict[str, Any]]] = [[] for _ in range(bins)]
     for e in es:
-        te = parse_iso(e["ts"]).timestamp()
+        # Use day for bucketing
+        day_str = e.get("day", e["ts"][:10])
+        day = dt.date.fromisoformat(day_str)
+        te = dt.datetime.combine(day, dt.time.min, tzinfo=dt.timezone.utc).timestamp()
+
         best_i = 0
         best_d = abs(te - centers[0])
         for i in range(1, bins):
@@ -58,7 +70,7 @@ def bucketize_by_time(entries: List[Dict[str, Any]], bins: int) -> List[List[Dic
         buckets[best_i].append(e)
 
     for b in buckets:
-        b.sort(key=lambda e: e["ts"])
+        b.sort(key=lambda e: e.get("day", e["ts"]))
     return buckets
 
 
@@ -68,9 +80,12 @@ def summarize_bucket(bucket: List[Dict[str, Any]]) -> Optional[Tuple[float, dt.d
     vals = [float(e["value"]) for e in bucket]
     avg_val = sum(vals) / len(vals)
 
-    epochs = [parse_iso(e["ts"]).timestamp() for e in bucket]
-    avg_epoch = sum(epochs) / len(epochs)
-    avg_ts = dt.datetime.fromtimestamp(avg_epoch, tz=dt.timezone.utc)
+    # Use the day field (date the stat is for) to calculate "days ago"
+    # Take the median day in the bucket as representative
+    days = sorted([dt.date.fromisoformat(e.get("day", e["ts"][:10])) for e in bucket])
+    median_day = days[len(days) // 2]
+    # Convert to datetime for consistency with return type
+    avg_ts = dt.datetime.combine(median_day, dt.time(12, 0), tzinfo=dt.timezone.utc)
     return avg_val, avg_ts
 
 
@@ -82,7 +97,8 @@ def render_value_wick_graph_10(entries: List[Dict[str, Any]], metric_type: str) 
     if not entries:
         return [f"{t} graph: (no data)"]
 
-    es = sorted(entries, key=lambda e: e["ts"])
+    # Sort by day (the date the stat is for), not insertion timestamp
+    es = sorted(entries, key=lambda e: e.get("day", e["ts"]))
     now_dt = dt.datetime.now(dt.timezone.utc)
 
     buckets = bucketize_by_time(es, GRAPH_BINS)

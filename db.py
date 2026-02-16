@@ -3,7 +3,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 
-DB_VERSION = 1
+DB_VERSION = 2
 
 
 def new_db() -> Dict[str, Any]:
@@ -13,6 +13,8 @@ def new_db() -> Dict[str, Any]:
 def normalize_type(t: str) -> str:
     mapping = {
         "addweight": "weight",
+        "addpulls": "pulls",
+        "addpushes": "pushes",
         "weight": "weight",
         "pulls": "pulls",
         "pushes": "pushes",
@@ -37,12 +39,11 @@ def parse_day(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
 
 
-def date_to_entry_ts(day: dt.date) -> str:
-    # canonical timestamp for "a day"
-    return dt.datetime(day.year, day.month, day.day, 12, 0, 0, tzinfo=dt.timezone.utc).isoformat()
-
-
 def entry_day(e: Dict[str, Any]) -> dt.date:
+    """Get the day this entry is for (not when it was inserted)."""
+    if "day" in e:
+        return dt.date.fromisoformat(e["day"])
+    # Backward compat: derive from ts
     return parse_iso(e["ts"]).astimezone(dt.timezone.utc).date()
 
 
@@ -53,56 +54,31 @@ def entries_for_metric(db: Dict[str, Any], metric_type: str) -> List[Dict[str, A
     return es
 
 
-def _find_entry_for_day(db: Dict[str, Any], metric_type: str, day: dt.date) -> Optional[Dict[str, Any]]:
-    t = normalize_type(metric_type)
-    for e in db["entries"]:
-        if e.get("type") == t and entry_day(e) == day:
-            return e
-    return None
-
-
-def has_entry_for_day(db: Dict[str, Any], metric_type: str, day: dt.date) -> bool:
-    return _find_entry_for_day(db, metric_type, day) is not None
-
-
-def add_entry_one_per_day(
+def add_entry(
     db: Dict[str, Any],
     metric_type: str,
     value: float,
     day: Optional[dt.date] = None,
 ) -> Dict[str, Any]:
     """
-    Upsert semantics (one entry per metric per day):
-      - weight: if exists, update value to avg(old, new)
-      - pulls/pushes: if exists, update value to max(old, new)
-      - if not exists, create a new entry
+    Add a new entry (append-only, no merging).
 
-    Returns the created/updated entry.
+    Args:
+        db: Database dict
+        metric_type: "weight", "pulls", or "pushes"
+        value: Numeric value
+        day: Which date this stat is FOR (defaults to today)
+
+    Returns the created entry.
     """
     t = normalize_type(metric_type)
-    day = day or now_utc().date()
-
-    existing = _find_entry_for_day(db, t, day)
-    if existing is not None:
-        old_val = float(existing["value"])
-        new_val = float(value)
-
-        if t == "weight":
-            merged = (old_val + new_val) / 2.0
-        elif t in ("pulls", "pushes"):
-            merged = max(old_val, new_val)
-        else:
-            # Shouldn't happen due to normalize_type, but keep safe behavior.
-            merged = new_val
-
-        existing["value"] = merged
-        # Keep the canonical ts for that day (no change) and stable id (no change).
-        db["entries"].sort(key=lambda e: (e["ts"], e["id"]))
-        return existing
+    now = now_utc()
+    target_day = day or now.date()
 
     entry = {
         "id": str(uuid.uuid4()),
-        "ts": date_to_entry_ts(day),
+        "day": target_day.isoformat(),
+        "ts": now.isoformat(),
         "type": t,
         "value": value,
     }
@@ -117,7 +93,60 @@ def delete_entry(db: Dict[str, Any], entry_id: str) -> bool:
     return len(db["entries"]) != before
 
 
+def entries_for_metric_by_day(db: Dict[str, Any], metric_type: str) -> List[Dict[str, Any]]:
+    """
+    Get aggregated entries for a metric, one per day.
+
+    For each day with entries:
+      - weight: average all values for that day
+      - pulls/pushes: max of all values for that day
+
+    Returns list of synthetic entries (one per day) sorted by day.
+    Each entry has: {day, ts, type, value}
+    """
+    t = normalize_type(metric_type)
+    es = [e for e in db["entries"] if e.get("type") == t]
+
+    if not es:
+        return []
+
+    # Group by day
+    by_day: Dict[str, List[Dict[str, Any]]] = {}
+    for e in es:
+        day_str = entry_day(e).isoformat()
+        if day_str not in by_day:
+            by_day[day_str] = []
+        by_day[day_str].append(e)
+
+    # Aggregate each day
+    aggregated = []
+    for day_str, day_entries in by_day.items():
+        values = [float(e["value"]) for e in day_entries]
+
+        if t == "weight":
+            agg_value = sum(values) / len(values)  # average
+        elif t in ("pulls", "pushes"):
+            agg_value = max(values)  # max
+        else:
+            agg_value = values[-1]  # fallback: last value
+
+        # Use the latest timestamp for this day as representative
+        latest_ts = max(day_entries, key=lambda e: e["ts"])["ts"]
+
+        aggregated.append({
+            "day": day_str,
+            "ts": latest_ts,
+            "type": t,
+            "value": agg_value,
+        })
+
+    # Sort by day
+    aggregated.sort(key=lambda e: e["day"])
+    return aggregated
+
+
 def recent_entries(db: Dict[str, Any], n: int = 5) -> List[Dict[str, Any]]:
+    """Get the most recent entries by insertion time (ts)."""
     es = list(db["entries"])
     es.sort(key=lambda e: (e["ts"], e["id"]))
     return es[-n:]

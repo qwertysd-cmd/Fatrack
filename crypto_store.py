@@ -94,7 +94,6 @@ def encrypt_json(password: str, obj: Dict[str, Any]) -> bytes:
         tmp_path = tf.name
 
     try:
-        gpg_args_with_file = gpg_args + ["--encrypt", tmp_path]  # wrong: gpg uses --symmetric without --encrypt
         # Correct invocation: gpg --symmetric [file]
         gpg_args_with_file = gpg_args + [tmp_path]
 

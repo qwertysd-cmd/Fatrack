@@ -5,10 +5,10 @@ from typing import Any, Dict, List
 from crypto_store import load_db_file, save_db_file, CryptoStoreError
 from db import (
     new_db,
-    add_entry_one_per_day,
+    add_entry,
     delete_entry,
     entry_day,
-    entries_for_metric,
+    entries_for_metric_by_day,
     normalize_type,
     parse_day,
     recent_entries,
@@ -23,16 +23,16 @@ DB_FILE = os.path.join(BASE_DIR, "storage.enc")
 
 
 HELP_TEXT = """Commands:
-  addweight <kg> [YYYY-MM-DD] [silent]      Add weight (one entry per day)
-  addpulls <reps> [YYYY-MM-DD] [silent]     Add pull-ups (one entry per day)
-  addpushes <reps> [YYYY-MM-DD] [silent]    Add push-ups (one entry per day)
+  addweight <kg> [YYYY-MM-DD] [silent]      Add weight entry
+  addpulls <reps> [YYYY-MM-DD] [silent]     Add pull-ups entry
+  addpushes <reps> [YYYY-MM-DD] [silent]    Add push-ups entry
 
   overview                                  Show overview (includes graphs)
   weight                                    Show weight (summary + graph)
   pulls                                     Show pulls (summary + graph)
   pushes                                    Show pushes (summary + graph)
 
-  recent [N]                                Show last N entries (default 5)
+  recent [N]                                Show last N entries by insertion time (default 5)
   delete <id>                               Delete an entry by id (use 'recent' to find ids)
 
   help                                      Show this help
@@ -40,7 +40,8 @@ HELP_TEXT = """Commands:
 
 Notes:
   - Date must be YYYY-MM-DD (no brackets).
-  - One entry per metric per day is enforced.
+  - Multiple entries per day are allowed.
+  - Graphs show daily averages (weight) or max (pulls/pushes).
 """
 
 
@@ -58,22 +59,22 @@ def parse_command(line: str) -> List[str]:
 def metric_summary(db: Dict[str, Any], metric_type: str) -> List[str]:
     t = normalize_type(metric_type)
     unit = "kg" if t == "weight" else "reps"
-    es = entries_for_metric(db, t)
+    es = entries_for_metric_by_day(db, t)
     if not es:
         return [f"{t}: (no data)"]
     latest = es[-1]
     latest_val = float(latest["value"])
     latest_str = f"{latest_val:.2f}" if t == "weight" else f"{latest_val:g}"
     return [
-        f"{t}: latest {latest_str} {unit} ({latest['ts']})",
-        f"{t}: total entries {len(es)}",
+        f"{t}: latest {latest_str} {unit} (day={latest['day']})",
+        f"{t}: total daily entries {len(es)}",
     ]
 
 
 def print_metric_view(db: Dict[str, Any], metric_type: str) -> None:
     for line in metric_summary(db, metric_type):
         print(line)
-    for line in render_value_wick_graph_10(entries_for_metric(db, metric_type), metric_type):
+    for line in render_value_wick_graph_10(entries_for_metric_by_day(db, metric_type), metric_type):
         print(line)
 
 
@@ -88,9 +89,10 @@ def print_recent(db: Dict[str, Any], n: int) -> None:
     if not es:
         print("(no entries)")
         return
-    print(f"Last {len(es)} insertion(s):")
+    print(f"Last {len(es)} insertion(s) (by timestamp):")
     for e in reversed(es):
-        print(f"  id={e['id']}  day={entry_day(e)}  ts={e['ts']}  type={e['type']}  value={e['value']}")
+        day_str = e.get("day", entry_day(e).isoformat())
+        print(f"  id={e['id']}  for_day={day_str}  inserted_at={e['ts']}  type={e['type']}  value={e['value']}")
 
 
 def interactive_loop(db: Dict[str, Any], password: str) -> None:
@@ -164,9 +166,7 @@ def interactive_loop(db: Dict[str, Any], password: str) -> None:
                     print(f"Usage: {cmd} <value> [YYYY-MM-DD] [silent]")
                     continue
 
-                hashmap= {"addweight":"weight", "addpulls":"pulls", "addpushes":"pushes"}
-
-                metric_type = hashmap[cmd]
+                metric_type = normalize_type(cmd)
 
                 # parse value
                 if metric_type == "weight":
@@ -191,7 +191,7 @@ def interactive_loop(db: Dict[str, Any], password: str) -> None:
                 if len(rest) == 1:
                     day = parse_day(rest[0])
 
-                add_entry_one_per_day(db, metric_type, value, day=day)
+                add_entry(db, metric_type, value, day=day)
                 save_db_file(DB_FILE, password, db)
 
                 if not silent:
