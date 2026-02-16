@@ -1,6 +1,3 @@
-# Encrypted fitness data storage
-storage.enc
-
 # Python cache
 __pycache__/
 *.py[cod]
